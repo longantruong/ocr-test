@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Mini OCR Scanner</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:#111; color:#fff; }
+  header { padding:16px; text-align:center; }
+  h1 { margin:0 0 5px; font-size:22px; }
+  .sub { color:#aaa; font-size:13px; }
+  .wrap { max-width:720px; margin:auto; padding:0 12px 24px; }
+  .camera { position:relative; overflow:hidden; border-radius:16px; background:#000; }
+  video { width:100%; display:block; aspect-ratio:16/10; object-fit:cover; }
+  .frame {
+    position:absolute; left:7%; right:7%; top:35%; height:30%;
+    border:3px solid #00e676; border-radius:10px;
+    box-shadow:0 0 0 9999px rgba(0,0,0,.32);
+    pointer-events:none;
+  }
+  .hint { position:absolute; bottom:10px; left:0; right:0; text-align:center;
+          font-size:13px; text-shadow:0 1px 3px #000; }
+  button {
+    width:100%; margin-top:12px; padding:14px; border:0; border-radius:12px;
+    background:#00e676; color:#07130c; font-weight:700; font-size:16px;
+  }
+  button:disabled { opacity:.45; }
+  .result { margin-top:14px; padding:18px; border-radius:14px; background:#222; text-align:center; }
+  .label { color:#aaa; font-size:12px; }
+  #result { font-size:40px; font-weight:800; letter-spacing:4px; margin-top:4px; min-height:48px; }
+  #status { margin-top:8px; color:#bbb; font-size:13px; min-height:20px; }
+  canvas { display:none; }
+  .debug { margin-top:12px; color:#888; font-size:11px; word-break:break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔢 Mini Web OCR</h1>
+  <div class="sub">Nhận diện số trong ngoặc: (087)</div>
+</header>
+
+<div class="wrap">
+  <div class="camera">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="frame"></div>
+    <div class="hint">Đưa dãy số vào khung xanh</div>
+  </div>
+
+  <button id="start">📷 Bật camera</button>
+  <button id="scan" disabled>🔍 Scan</button>
+
+  <div class="result">
+    <div class="label">KẾT QUẢ</div>
+    <div id="result">---</div>
+    <div id="status">Chưa khởi động</div>
+  </div>
+
+  <div class="debug" id="debug"></div>
+  <canvas id="canvas"></canvas>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const startBtn = document.getElementById('start');
+const scanBtn = document.getElementById('scan');
+const resultEl = document.getElementById('result');
+const statusEl = document.getElementById('status');
+const debugEl = document.getElementById('debug');
+
+let stream = null;
+let worker = null;
+let busy = false;
+
+function status(s) { statusEl.textContent = s; }
+
+async function startCamera() {
+  try {
+    status('Đang xin quyền camera...');
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    scanBtn.disabled = false;
+    startBtn.disabled = true;
+    status('Camera sẵn sàng. Đưa (xxx) vào khung.');
+  } catch (e) {
+    status('Không mở được camera: ' + e.message);
+  }
+}
+
+function captureROI() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  // Khớp với khung xanh trên video: x 7%-93%, y 35%-65%.
+  const sx = Math.round(vw * 0.07);
+  const sy = Math.round(vh * 0.35);
+  const sw = Math.round(vw * 0.86);
+  const sh = Math.round(vh * 0.30);
+
+  // Upscale để OCR dễ đọc hơn.
+  const scale = 2.5;
+  canvas.width = Math.round(sw * scale);
+  canvas.height = Math.round(sh * scale);
+  const ctx = canvas.getContext('2d', {willReadFrequently:true});
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+  // Grayscale + contrast nhẹ.
+  const img = ctx.getImageData(0,0,canvas.width,canvas.height);
+  const d = img.data;
+  for (let i=0; i<d.length; i+=4) {
+    const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    const c = Math.max(0, Math.min(255, (g - 128) * 1.45 + 128));
+    d[i] = d[i+1] = d[i+2] = c;
+  }
+  ctx.putImageData(img,0,0);
+  return canvas;
+}
+
+async function scan() {
+  if (busy || !video.videoWidth) return;
+  busy = true;
+  scanBtn.disabled = true;
+  resultEl.textContent = '…';
+  status('Đang OCR...');
+
+  try {
+    if (!worker) {
+      status('Đang tải OCR lần đầu...');
+      worker = await Tesseract.createWorker('eng', 1, {
+        logger: m => {
+          if (m.status === 'recognizing text') {
+            status('OCR ' + Math.round((m.progress || 0) * 100) + '%');
+          }
+        }
+      });
+      await worker.setParameters({
+        tessedit_char_whitelist: '0123456789()',
+        tessedit_pageseg_mode: '7',
+        preserve_interword_spaces: '0'
+      });
+    }
+
+    const image = captureROI();
+    const { data } = await worker.recognize(image);
+
+    const raw = (data.text || '').replace(/\s+/g, '');
+    debugEl.textContent = 'OCR raw: ' + raw;
+
+    // Ưu tiên pattern (3 chữ số), fallback cho số trong ngoặc có độ dài khác.
+    let m = raw.match(/\(([0-9]{3})\)/);
+    if (!m) m = raw.match(/\(([0-9]+)\)/);
+
+    if (m) {
+      resultEl.textContent = m[1];
+      status('✓ Đã nhận diện');
+    } else {
+      resultEl.textContent = '---';
+      status('Chưa thấy dạng (xxx). Thử lại gần hơn.');
+    }
+  } catch (e) {
+    resultEl.textContent = 'ERR';
+    status('Lỗi OCR: ' + e.message);
+  } finally {
+    busy = false;
+    scanBtn.disabled = false;
+  }
+}
+
+startBtn.addEventListener('click', startCamera);
+scanBtn.addEventListener('click', scan);
+
+window.addEventListener('beforeunload', () => {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (worker) worker.terminate();
+});
+</script>
+</body>
+</html>
