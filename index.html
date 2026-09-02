@@ -54,10 +54,10 @@
 
     .frame {
       position: absolute;
-      left: 7%;
-      right: 7%;
-      top: 35%;
-      height: 30%;
+      left: 4%;
+      right: 4%;
+      top: 40%;
+      height: 20%;
       border: 3px solid #00e676;
       border-radius: 10px;
       box-shadow: 0 0 0 9999px rgba(0, 0, 0, .32);
@@ -134,7 +134,7 @@
 <body>
   <header>
     <h1>🔢 Mini Web OCR</h1>
-    <div class="sub">Tự động nhận diện số trong ngoặc: vd (087)</div>
+    <div class="sub">Chỉ nhận diện mã 3 số trong ngoặc: (087)</div>
   </header>
 
   <div class="wrap">
@@ -185,7 +185,7 @@
         video.srcObject = stream;
         await video.play();
         startBtn.disabled = true;
-        status('Camera sẵn sàng. Đang tự quét (xxx)...');
+        status('Camera sẵn sàng. Căn dòng có (xxx) vào khung xanh.');
         scheduleNextScan(150);
       } catch (e) {
         status('Không mở được camera: ' + e.message);
@@ -194,26 +194,49 @@
 
     function captureROI() {
       const vw = video.videoWidth, vh = video.videoHeight;
-      // Khớp với khung xanh trên video: x 7%-93%, y 35%-65%.
-      const sx = Math.round(vw * 0.07);
-      const sy = Math.round(vh * 0.35);
-      const sw = Math.round(vw * 0.86);
-      const sh = Math.round(vh * 0.30);
+      // Khớp với khung xanh: một dải mỏng để chỉ đọc dòng chứa (xxx).
+      const sx = Math.round(vw * 0.04);
+      const sy = Math.round(vh * 0.40);
+      const sw = Math.round(vw * 0.92);
+      const sh = Math.round(vh * 0.20);
 
       // Upscale để OCR dễ đọc hơn.
-      const scale = 2.5;
+      const scale = 2;
       canvas.width = Math.round(sw * scale);
       canvas.height = Math.round(sh * scale);
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 
-      // Grayscale + tương phản mạnh hơn giúp thấy rõ nét số và ngoặc.
+      // Chuyển sang đen/trắng bằng ngưỡng Otsu: chữ in rõ hơn và OCR nhanh hơn.
       const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const d = img.data;
+      const histogram = new Uint32Array(256);
       for (let i = 0; i < d.length; i += 4) {
-        const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-        const c = Math.max(0, Math.min(255, (g - 128) * 2.1 + 128));
-        d[i] = d[i + 1] = d[i + 2] = c;
+        const gray = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+        d[i] = d[i + 1] = d[i + 2] = gray;
+        histogram[gray]++;
+      }
+      const pixelCount = canvas.width * canvas.height;
+      let sum = 0;
+      for (let i = 0; i < 256; i++) sum += i * histogram[i];
+      let backgroundWeight = 0, backgroundSum = 0, bestVariance = 0, threshold = 150;
+      for (let i = 0; i < 256; i++) {
+        backgroundWeight += histogram[i];
+        if (!backgroundWeight) continue;
+        const foregroundWeight = pixelCount - backgroundWeight;
+        if (!foregroundWeight) break;
+        backgroundSum += i * histogram[i];
+        const backgroundMean = backgroundSum / backgroundWeight;
+        const foregroundMean = (sum - backgroundSum) / foregroundWeight;
+        const variance = backgroundWeight * foregroundWeight * (backgroundMean - foregroundMean) ** 2;
+        if (variance > bestVariance) {
+          bestVariance = variance;
+          threshold = i;
+        }
+      }
+      for (let i = 0; i < d.length; i += 4) {
+        const value = d[i] > threshold ? 255 : 0;
+        d[i] = d[i + 1] = d[i + 2] = value;
       }
       ctx.putImageData(img, 0, 0);
       return canvas;
@@ -232,8 +255,8 @@
         .replace(/[Gg]/g, '6')
         .replace(/[Bb]/g, '8');
 
-      // Ưu tiên đúng 3 chữ số, nhưng vẫn hỗ trợ mã có số lượng chữ số khác.
-      const match = normalized.match(/\(([0-9]{3})\)/) || normalized.match(/\(([0-9]+)\)/);
+      // Chỉ chấp nhận đúng mã ba chữ số nằm trong ngoặc, ví dụ (087).
+      const match = normalized.match(/\(([0-9]{3})\)/);
       return match ? match[1] : null;
     }
 
@@ -286,7 +309,7 @@
         status('Lỗi OCR: ' + e.message);
       } finally {
         busy = false;
-        scheduleNextScan(650);
+        scheduleNextScan(400);
       }
     }
 
